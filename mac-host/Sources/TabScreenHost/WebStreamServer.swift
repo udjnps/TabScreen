@@ -5,8 +5,18 @@ import AppKit
 public class WebStreamServer {
     public static let shared = WebStreamServer()
 
+    private final class ClientState {
+        let connection: NWConnection
+        var hasReceivedKeyframe: Bool = false
+        var isSending: Bool = false
+
+        init(connection: NWConnection) {
+            self.connection = connection
+        }
+    }
+
     private var listener: NWListener?
-    private var connections: [NWConnection] = []
+    private var clients: [ClientState] = []
     private let queue = DispatchQueue(label: "com.tabscreen.webStreamQueue", qos: .userInteractive)
     private let port: NWEndpoint.Port = 28285
 
@@ -22,10 +32,8 @@ public class WebStreamServer {
     public var onStreamStarted: (() -> Void)?
     public var onStreamStopped: (() -> Void)?
 
-    private var cachedHeaderPacket: Data?
-
     public var connectedClientsCount: Int {
-        return queue.sync { connections.count }
+        return queue.sync { clients.count }
     }
 
     public var fullViewerURL: String? {
@@ -91,10 +99,10 @@ public class WebStreamServer {
             self.isRunning = false
             print("[TabScreen Web] 🛑 Stopping Web Stream Server...")
 
-            for conn in self.connections {
-                conn.cancel()
+            for client in self.clients {
+                client.connection.cancel()
             }
-            self.connections.removeAll()
+            self.clients.removeAll()
 
             self.listener?.cancel()
             self.listener = nil
@@ -123,18 +131,15 @@ public class WebStreamServer {
         queue.async { [weak self] in
             guard let self = self else { return }
             print("[TabScreen Web] 📱 New web browser connected from \(connection.endpoint)")
-            self.connections.append(connection)
+            let client = ClientState(connection: connection)
+            self.clients.append(client)
 
             connection.stateUpdateHandler = { [weak self, weak connection] state in
                 guard let self = self, let conn = connection else { return }
                 switch state {
                 case .ready:
                     print("[TabScreen Web] 🟢 Web client ready: \(conn.endpoint)")
-                    // Send cached SPS/PPS header packet immediately if available
-                    if let header = self.cachedHeaderPacket {
-                        self.sendPacket(header, to: conn)
-                    }
-                    // Request an immediate keyframe so the viewer starts rendering instantly
+                    // Request an immediate keyframe so this viewer starts rendering cleanly on its first packet
                     self.onRequestKeyframe?()
                     self.receiveMessages(from: conn)
                     self.notifyClientsChanged()
@@ -159,15 +164,16 @@ public class WebStreamServer {
     private func removeConnection(_ connection: NWConnection) {
         queue.async { [weak self] in
             guard let self = self else { return }
-            if let index = self.connections.firstIndex(where: { $0 === connection }) {
-                self.connections.remove(at: index)
+            if let index = self.clients.firstIndex(where: { $0.connection === connection }) {
+                let client = self.clients.remove(at: index)
+                client.connection.cancel()
                 self.notifyClientsChanged()
             }
         }
     }
 
     private func notifyClientsChanged() {
-        let count = self.connections.count
+        let count = self.clients.count
         DispatchQueue.main.async { [weak self] in
             self?.onClientsChanged?(count)
         }
@@ -202,18 +208,12 @@ public class WebStreamServer {
     // MARK: - Broadcasting Video
     public func broadcastVideoPacket(_ rawPacket: Data) {
         queue.async { [weak self] in
-            guard let self = self, self.isRunning, !self.connections.isEmpty else { return }
+            guard let self = self, self.isRunning, !self.clients.isEmpty else { return }
 
             // rawPacket has 4 bytes length prefix followed by Annex-B NALUs
             guard rawPacket.count > 4 else { return }
             let annexBData = rawPacket.subdata(in: 4..<rawPacket.count)
-
-            // Cache keyframe header (contains SPS/PPS)
-            if self.isKeyframePacket(annexBData) {
-                var headerPkt = Data([0x01]) // 0x01 = Video frame
-                headerPkt.append(annexBData)
-                self.cachedHeaderPacket = headerPkt
-            }
+            let isKey = self.isKeyframePacket(annexBData)
 
             // Packet format: [0x01 (Type: Video), ...Annex-B NAL units...]
             var wsPacket = Data()
@@ -221,18 +221,33 @@ public class WebStreamServer {
             wsPacket.append(0x01)
             wsPacket.append(annexBData)
 
-            for conn in self.connections {
-                if conn.state == .ready {
-                    self.sendPacket(wsPacket, to: conn)
+            for client in self.clients {
+                guard client.connection.state == .ready else { continue }
+                if isKey {
+                    client.hasReceivedKeyframe = true
+                }
+                // Never send delta frames to a client until it has received its first keyframe
+                guard client.hasReceivedKeyframe else { continue }
+
+                // Drop non-keyframes if previous send is still in flight to avoid network buffer bloat
+                if client.isSending && !isKey {
+                    continue
+                }
+
+                client.isSending = true
+                self.sendPacket(wsPacket, to: client.connection) {
+                    client.isSending = false
                 }
             }
         }
     }
 
-    private func sendPacket(_ data: Data, to connection: NWConnection) {
+    private func sendPacket(_ data: Data, to connection: NWConnection, completion: (() -> Void)? = nil) {
         let metadata = NWProtocolWebSocket.Metadata(opcode: .binary)
         let context = NWConnection.ContentContext(identifier: "video", metadata: [metadata])
-        connection.send(content: data, contentContext: context, isComplete: true, completion: .contentProcessed({ _ in }))
+        connection.send(content: data, contentContext: context, isComplete: true, completion: .contentProcessed({ _ in
+            completion?()
+        }))
     }
 
     private func isKeyframePacket(_ data: Data) -> Bool {

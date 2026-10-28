@@ -5,7 +5,7 @@
   // Elements
   const container = document.getElementById('appContainer');
   const canvas = document.getElementById('displayCanvas');
-  const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
+  const ctx = canvas.getContext('2d', { alpha: false });
   const toolbar = document.getElementById('toolbar');
   const statusBadge = document.getElementById('statusBadge');
   const statusText = document.getElementById('statusText');
@@ -193,7 +193,8 @@
   }
 
   function handleDecodedFrame(frame) {
-    if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight) {
+    if (frame.displayWidth > 0 && frame.displayHeight > 0 &&
+        (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight)) {
       canvas.width = frame.displayWidth;
       canvas.height = frame.displayHeight;
     }
@@ -203,7 +204,11 @@
     frameCount++;
   }
 
+  let lastKeyframeRequestTime = 0;
   function requestKeyframeFromHost() {
+    const now = performance.now();
+    if (now - lastKeyframeRequestTime < 1000) return;
+    lastKeyframeRequestTime = now;
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(new Uint8Array([0xFE])); // 0xFE = Request Keyframe
     }
@@ -289,11 +294,6 @@
         timestamp: ts,
         data: h264Bytes
       });
-
-      // Avoid queue bloat: drop non-keyframe if decoder queue is backed up
-      if (decoder.decodeQueueSize > 2 && !isKey) {
-        return;
-      }
 
       decoder.decode(chunk);
     } catch (e) {

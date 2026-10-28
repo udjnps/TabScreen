@@ -133,7 +133,7 @@ public class ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
         let byteLimit = 4_000_000 / 8
         let dataRateLimits = [byteLimit, 1] as CFArray
         VTSessionSetProperty(compression, key: kVTCompressionPropertyKey_DataRateLimits, value: dataRateLimits)
-        VTSessionSetProperty(compression, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: 90 as CFNumber) // Keyframe every 3 seconds
+        VTSessionSetProperty(compression, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: 60 as CFNumber) // Keyframe every 2 seconds
         VTSessionSetProperty(compression, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
 
         VTCompressionSessionPrepareToEncodeFrames(compression)
@@ -158,7 +158,7 @@ public class ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
         }
 
         let now = CACurrentMediaTime()
-        if isIdle {
+        if isIdle && !forceNextKeyframe {
             // Heartbeat: allow at most 10 frames per second when the screen is static (every 100ms)
             // Ensures clock, cursor, and web viewer remain responsive with virtually zero CPU overhead
             if now - lastFrameTime < 0.1 {
@@ -171,8 +171,8 @@ public class ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
 
         frameIndex += 1
         var frameProperties: [CFString: Any]? = nil
-        // Force keyframe on first frame, every 3 seconds (90 frames at 30 FPS), or on demand
-        if frameIndex == 1 || frameIndex % 90 == 0 || forceNextKeyframe {
+        // Force keyframe on first frame, every 2 seconds (60 frames at 30 FPS), or on demand
+        if frameIndex == 1 || frameIndex % 60 == 0 || forceNextKeyframe {
             frameProperties = [kVTEncodeFrameOptionKey_ForceKeyFrame: kCFBooleanTrue as Any]
             forceNextKeyframe = false
         }
