@@ -9,6 +9,7 @@ public class WebStreamServer {
         let connection: NWConnection
         var hasReceivedKeyframe: Bool = false
         var isSending: Bool = false
+        var isAuthenticated: Bool = false
 
         init(connection: NWConnection) {
             self.connection = connection
@@ -19,6 +20,12 @@ public class WebStreamServer {
     private var clients: [ClientState] = []
     private let queue = DispatchQueue(label: "com.tabscreen.webStreamQueue", qos: .userInteractive)
     private let port: NWEndpoint.Port = 28285
+
+    public let authorizedEmail: String = "udjnps@gmail.com"
+    private var currentOTP: String?
+    private var otpExpiration: Date?
+    private var validTokens: Set<String> = []
+    private let tokensFilePath: String = NSString(string: "~/.tabscreen_auth_tokens.json").expandingTildeInPath
 
     private var cloudflaredProcess: Process?
     public private(set) var publicTunnelURL: String?
@@ -40,7 +47,126 @@ public class WebStreamServer {
         return vercelAppURL
     }
 
-    private init() {}
+    private init() {
+        loadTokens()
+    }
+
+    // MARK: - Authentication Management
+    private func loadTokens() {
+        if let data = try? Data(contentsOf: URL(fileURLWithPath: tokensFilePath)),
+           let tokens = try? JSONDecoder().decode([String].self, from: data) {
+            validTokens = Set(tokens)
+            print("[TabScreen Auth] Loaded \(validTokens.count) authorized device tokens")
+        }
+    }
+
+    private func saveTokens() {
+        if let data = try? JSONEncoder().encode(Array(validTokens)) {
+            try? data.write(to: URL(fileURLWithPath: tokensFilePath))
+        }
+    }
+
+    private func generateAndSendOTP() -> Bool {
+        let code = String(format: "%06d", Int.random(in: 100000...999999))
+        currentOTP = code
+        otpExpiration = Date().addingTimeInterval(600) // 10 minutes
+
+        print("[TabScreen Auth] 🔐 Generated verification code: \(code) for \(authorizedEmail)")
+        fflush(stdout)
+
+        let otpFile = NSString(string: "~/.tabscreen_last_otp.txt").expandingTildeInPath
+        try? code.write(toFile: otpFile, atomically: true, encoding: .utf8)
+
+        // Send email via native Apple Mail silently in background
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self = self else { return }
+            let script = """
+            tell application "Mail"
+                set newMessage to make new outgoing message with properties {subject:"TabScreen Login Code: \(code)", content:"Your 6-digit TabScreen verification code is: \(code)\\n\\nValid for 10 minutes.\\n\\nIf you did not request this, you can safely ignore this email.", visible:false}
+                tell newMessage
+                    make new to recipient at end of to recipients with properties {address:"\(self.authorizedEmail)"}
+                    send
+                end tell
+            end tell
+            """
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            proc.arguments = ["-e", script]
+            try? proc.run()
+        }
+
+        // Also display macOS desktop banner
+        showNotification(title: "🔒 TabScreen Code: \(code)", subtitle: "Sent to \(authorizedEmail)", url: "")
+        return true
+    }
+
+    private func handleAuthMessage(_ payload: Data, from connection: NWConnection) {
+        guard let json = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],
+              let action = json["action"] as? String else { return }
+
+        guard let client = clients.first(where: { $0.connection === connection }) else { return }
+
+        switch action {
+        case "authenticate":
+            let token = (json["token"] as? String) ?? ""
+            if !token.isEmpty && validTokens.contains(token) {
+                print("[TabScreen Auth] ✅ Client \(connection.endpoint) verified via saved device token")
+                client.isAuthenticated = true
+                sendAuthMessage(["status": "auth_success"], to: connection)
+                onRequestKeyframe?()
+            } else {
+                print("[TabScreen Auth] ⚠️ Client \(connection.endpoint) invalid or expired token")
+                sendAuthMessage(["status": "auth_error", "message": "Session expired or invalid device token"], to: connection)
+            }
+
+        case "request_otp":
+            let email = (json["email"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+            if email == authorizedEmail.lowercased() {
+                _ = generateAndSendOTP()
+                sendAuthMessage(["status": "otp_sent", "email": authorizedEmail], to: connection)
+            } else {
+                print("[TabScreen Auth] ❌ Unauthorized email requested: \(email)")
+                sendAuthMessage(["status": "auth_error", "message": "Only \(authorizedEmail) is authorized to access this Mac"], to: connection)
+            }
+
+        case "verify_otp":
+            let code = (json["code"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let now = Date()
+            if let targetOTP = currentOTP, let exp = otpExpiration, now < exp && code == targetOTP {
+                currentOTP = nil // Expire immediately after single use
+                try? FileManager.default.removeItem(atPath: NSString(string: "~/.tabscreen_last_otp.txt").expandingTildeInPath)
+                let newToken = "ts_" + UUID().uuidString.replacingOccurrences(of: "-", with: "") + UUID().uuidString.replacingOccurrences(of: "-", with: "")
+                validTokens.insert(newToken)
+                saveTokens()
+
+                print("[TabScreen Auth] 🎉 Client \(connection.endpoint) successfully entered valid OTP!")
+                client.isAuthenticated = true
+                sendAuthMessage(["status": "auth_success", "token": newToken], to: connection)
+                onRequestKeyframe?()
+            } else {
+                print("[TabScreen Auth] ❌ Incorrect or expired OTP code attempted: \(code)")
+                sendAuthMessage(["status": "auth_error", "message": "Incorrect or expired code. Please try again."], to: connection)
+            }
+
+        case "logout":
+            if let token = json["token"] as? String {
+                validTokens.remove(token)
+                saveTokens()
+            }
+            client.isAuthenticated = false
+            sendAuthMessage(["status": "auth_required", "email": authorizedEmail], to: connection)
+
+        default:
+            break
+        }
+    }
+
+    private func sendAuthMessage(_ dict: [String: Any], to connection: NWConnection) {
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: dict) else { return }
+        var packet = Data([0x0A])
+        packet.append(jsonData)
+        sendPacket(packet, to: connection)
+    }
 
     // MARK: - Start / Stop Server
     public func start() {
@@ -139,8 +265,8 @@ public class WebStreamServer {
                 switch state {
                 case .ready:
                     print("[TabScreen Web] 🟢 Web client ready: \(conn.endpoint)")
-                    // Request an immediate keyframe so this viewer starts rendering cleanly on its first packet
-                    self.onRequestKeyframe?()
+                    // Require authentication before streaming or accepting inputs
+                    self.sendAuthMessage(["status": "auth_required", "email": self.authorizedEmail], to: conn)
                     self.receiveMessages(from: conn)
                     self.notifyClientsChanged()
 
@@ -199,15 +325,24 @@ public class WebStreamServer {
 
             if let data = content, !data.isEmpty {
                 let firstByte = data[0]
-                if firstByte == 0xFF {
+                if firstByte == 0x0A {
+                    // Auth packet
+                    let payload = data.subdata(in: 1..<data.count)
+                    self.handleAuthMessage(payload, from: conn)
+                } else if firstByte == 0xFF {
                     // Ping packet: echo back pong immediately
                     self.sendPacket(data, to: conn)
-                } else if firstByte == 0xFE {
-                    // Keyframe request packet
-                    self.onRequestKeyframe?()
                 } else {
-                    // Forward input data directly to InputInjector
-                    self.onInputDataReceived?(data)
+                    let isAuth = self.clients.first(where: { $0.connection === conn })?.isAuthenticated ?? false
+                    if !isAuth {
+                        self.sendAuthMessage(["status": "auth_required", "email": self.authorizedEmail], to: conn)
+                    } else if firstByte == 0xFE {
+                        // Keyframe request packet
+                        self.onRequestKeyframe?()
+                    } else {
+                        // Forward input data directly to InputInjector
+                        self.onInputDataReceived?(data)
+                    }
                 }
             }
 
@@ -234,6 +369,7 @@ public class WebStreamServer {
 
             for client in self.clients {
                 guard client.connection.state == .ready else { continue }
+                guard client.isAuthenticated else { continue } // Only stream to authenticated clients!
                 if isKey {
                     client.hasReceivedKeyframe = true
                 }

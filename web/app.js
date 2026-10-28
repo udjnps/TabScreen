@@ -25,6 +25,19 @@
   const sendTextBtn = document.getElementById('sendTextBtn');
   const closeKeyboardBtn = document.getElementById('closeKeyboardBtn');
 
+  // Auth Elements
+  const authModal = document.getElementById('authModal');
+  const authAlert = document.getElementById('authAlert');
+  const authStepEmail = document.getElementById('authStepEmail');
+  const authStepOtp = document.getElementById('authStepOtp');
+  const authEmailInput = document.getElementById('authEmailInput');
+  const sendOtpBtn = document.getElementById('sendOtpBtn');
+  const authOtpInput = document.getElementById('authOtpInput');
+  const verifyOtpBtn = document.getElementById('verifyOtpBtn');
+  const authResendBtn = document.getElementById('authResendBtn');
+  const authBackBtn = document.getElementById('authBackBtn');
+  const lockBtn = document.getElementById('lockBtn');
+
   // Zoom Elements
   const zoomInBtn = document.getElementById('zoomInBtn');
   const zoomOutBtn = document.getElementById('zoomOutBtn');
@@ -36,6 +49,8 @@
   let ws = null;
   let decoder = null;
   let decoderConfigured = false;
+  let isAuthenticated = false;
+  const AUTH_TOKEN_KEY = 'tabscreen_auth_token';
   let frameCount = 0;
   let fps = 0;
   let lastFpsTime = performance.now();
@@ -175,10 +190,16 @@
       ws.binaryType = 'arraybuffer';
 
       ws.onopen = () => {
-        updateStatus('connected', 'Live (60 FPS)');
+        updateStatus('connecting', 'Verifying Access...');
         initVideoDecoder();
         showToolbarTemporarily();
         startPing();
+
+        // Attempt instant token authentication if saved on this device
+        const token = localStorage.getItem(AUTH_TOKEN_KEY);
+        if (token) {
+          sendAuthPacket({ action: 'authenticate', token: token });
+        }
       };
 
       ws.onclose = () => {
@@ -298,6 +319,19 @@
 
     const packetType = bytes[0];
 
+    // Packet type 0x0A = Authentication JSON
+    if (packetType === 0x0A) {
+      const jsonBytes = bytes.subarray(1);
+      const jsonStr = new TextDecoder().decode(jsonBytes);
+      try {
+        const msg = JSON.parse(jsonStr);
+        handleAuthResponse(msg);
+      } catch (e) {
+        console.error('Failed to parse auth payload:', e);
+      }
+      return;
+    }
+
     // Packet type 0x01 = Video frame (H.264 Annex-B)
     if (packetType === 0x01) {
       const h264Data = bytes.subarray(1);
@@ -308,6 +342,120 @@
       latency = Math.round(now - lastPingTime);
       latencyStat.textContent = `${latency} ms`;
     }
+  }
+
+  // Authentication Helpers
+  function sendAuthPacket(obj) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      const jsonStr = JSON.stringify(obj);
+      const enc = new TextEncoder().encode(jsonStr);
+      const packet = new Uint8Array(1 + enc.length);
+      packet[0] = 0x0A;
+      packet.set(enc, 1);
+      ws.send(packet.buffer);
+    }
+  }
+
+  function handleAuthResponse(msg) {
+    console.log('[TabScreen Auth]', msg);
+    switch (msg.status) {
+      case 'auth_required':
+        isAuthenticated = false;
+        showAuthModal('Verification required to access this Mac display.');
+        break;
+
+      case 'otp_sent':
+        showAuthAlert('success', `Verification code sent to ${msg.email}! Check your Mail or Mac banner.`);
+        showOtpStep();
+        break;
+
+      case 'auth_success':
+        isAuthenticated = true;
+        if (msg.token) {
+          localStorage.setItem(AUTH_TOKEN_KEY, msg.token);
+        }
+        hideAuthModal();
+        updateStatus('connected', 'Live (60 FPS)');
+        requestKeyframeFromHost();
+        break;
+
+      case 'auth_error':
+        showAuthAlert('error', msg.message || 'Authentication failed.');
+        break;
+    }
+  }
+
+  function showAuthAlert(type, text) {
+    if (!authAlert) return;
+    authAlert.className = `auth-alert ${type}`;
+    authAlert.textContent = text;
+    authAlert.classList.remove('hidden');
+  }
+
+  function hideAuthAlert() {
+    if (!authAlert) return;
+    authAlert.classList.add('hidden');
+    authAlert.textContent = '';
+  }
+
+  function showAuthModal(initialInfo) {
+    if (!authModal) return;
+    authModal.classList.remove('hidden');
+    if (initialInfo) {
+      showAuthAlert('info', initialInfo);
+    }
+    showEmailStep();
+  }
+
+  function hideAuthModal() {
+    if (!authModal) return;
+    authModal.classList.add('hidden');
+    hideAuthAlert();
+  }
+
+  function showEmailStep() {
+    if (authStepEmail) authStepEmail.classList.remove('hidden');
+    if (authStepOtp) authStepOtp.classList.add('hidden');
+    if (authEmailInput) {
+      authEmailInput.focus();
+    }
+  }
+
+  function showOtpStep() {
+    if (authStepEmail) authStepEmail.classList.add('hidden');
+    if (authStepOtp) authStepOtp.classList.remove('hidden');
+    if (authOtpInput) {
+      authOtpInput.value = '';
+      authOtpInput.focus();
+    }
+  }
+
+  function handleSendOtp() {
+    const email = authEmailInput ? authEmailInput.value.trim() : '';
+    if (!email) {
+      showAuthAlert('error', 'Please enter your email address.');
+      return;
+    }
+    showAuthAlert('info', 'Sending verification code...');
+    sendAuthPacket({ action: 'request_otp', email: email });
+  }
+
+  function handleVerifyOtp() {
+    const code = authOtpInput ? authOtpInput.value.trim() : '';
+    if (code.length !== 6) {
+      showAuthAlert('error', 'Please enter the complete 6-digit code.');
+      return;
+    }
+    showAuthAlert('info', 'Verifying code...');
+    sendAuthPacket({ action: 'verify_otp', code: code });
+  }
+
+  function handleLogout() {
+    const token = localStorage.getItem(AUTH_TOKEN_KEY);
+    localStorage.removeItem(AUTH_TOKEN_KEY);
+    sendAuthPacket({ action: 'logout', token: token });
+    isAuthenticated = false;
+    showAuthModal('Logged out. Re-authenticate to access the display.');
   }
 
   function feedH264Chunk(h264Bytes) {
@@ -416,6 +564,7 @@
   }
 
   function sendMousePacket(type, normX, normY, deltaX = 0, deltaY = 0, toolType = 0) {
+    if (!isAuthenticated) return;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
 
     const buffer = new ArrayBuffer(18);
@@ -432,12 +581,14 @@
   }
 
   function sendKeyPacket(keyCode, isDown) {
+    if (!isAuthenticated) return;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     const packet = new Uint8Array([6, keyCode, isDown ? 1 : 0]);
     ws.send(packet);
   }
 
   function sendUnicodePacket(charCode) {
+    if (!isAuthenticated) return;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     const high = (charCode >> 8) & 0xFF;
     const low = charCode & 0xFF;
@@ -446,6 +597,7 @@
   }
 
   function sendSystemAction(actionId) {
+    if (!isAuthenticated) return;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     const packet = new Uint8Array([12, actionId, 0]);
     ws.send(packet);
@@ -561,6 +713,31 @@
         }
       });
     });
+
+    // Authentication Listeners
+    if (sendOtpBtn) sendOtpBtn.addEventListener('click', handleSendOtp);
+    if (authEmailInput) {
+      authEmailInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') handleSendOtp();
+      });
+    }
+
+    if (verifyOtpBtn) verifyOtpBtn.addEventListener('click', handleVerifyOtp);
+    if (authOtpInput) {
+      authOtpInput.addEventListener('input', (e) => {
+        e.target.value = e.target.value.replace(/[^0-9]/g, '');
+        if (e.target.value.length === 6) {
+          handleVerifyOtp();
+        }
+      });
+      authOtpInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') handleVerifyOtp();
+      });
+    }
+
+    if (authResendBtn) authResendBtn.addEventListener('click', handleSendOtp);
+    if (authBackBtn) authBackBtn.addEventListener('click', showEmailStep);
+    if (lockBtn) lockBtn.addEventListener('click', handleLogout);
 
     // Direct text sender
     sendTextBtn.addEventListener('click', sendDirectText);

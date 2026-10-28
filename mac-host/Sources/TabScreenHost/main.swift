@@ -121,6 +121,9 @@ class TabScreenHostApp: NetworkServerDelegate, ScreenStreamerDelegate, USBWatche
         usbWatcher.delegate = self
         usbWatcher.start()
 
+        // Automatically start Web Stream Server so https://tabscreen-live.udjnps.workers.dev is always live
+        webServer.start()
+
         // Handle signals for graceful shutdown
         signal(SIGINT) { _ in
             print("\n[TabScreen] Shutting down...")
