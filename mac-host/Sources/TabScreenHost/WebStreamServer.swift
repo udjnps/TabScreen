@@ -183,6 +183,20 @@ public class WebStreamServer {
         connection.receiveMessage { [weak self, weak connection] content, context, isComplete, error in
             guard let self = self, let conn = connection else { return }
 
+            if let error = error {
+                print("[TabScreen Web] ⚠️ Receive error: \(error)")
+                self.removeConnection(conn)
+                return
+            }
+
+            // Check if client sent WebSocket close frame
+            if let wsMeta = context?.protocolMetadata.compactMap({ $0 as? NWProtocolWebSocket.Metadata }).first,
+               wsMeta.opcode == .close {
+                print("[TabScreen Web] 🔌 Client sent close frame: \(conn.endpoint)")
+                self.removeConnection(conn)
+                return
+            }
+
             if let data = content, !data.isEmpty {
                 let firstByte = data[0]
                 if firstByte == 0xFF {
@@ -197,11 +211,8 @@ public class WebStreamServer {
                 }
             }
 
-            if isComplete || error != nil {
-                self.removeConnection(conn)
-            } else {
-                self.receiveMessages(from: conn)
-            }
+            // Always continue listening for the next incoming WebSocket message
+            self.receiveMessages(from: conn)
         }
     }
 
