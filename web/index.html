@@ -25,6 +25,17 @@
       </div>
 
       <div class="toolbar-right">
+        <!-- Zoom Controls -->
+        <div class="zoom-controls">
+          <button id="zoomOutBtn" class="tool-btn-small" title="Zoom Out (Make Smaller)">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+          </button>
+          <button id="zoomResetBtn" class="zoom-level-pill" title="Reset Zoom (Fit Screen)">100%</button>
+          <button id="zoomInBtn" class="tool-btn-small" title="Zoom In">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+          </button>
+        </div>
+
         <button id="systemActionsBtn" class="tool-btn" title="System Shortcuts">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>
         </button>
@@ -111,6 +122,19 @@
           <input type="text" id="streamUrlInput" placeholder="e.g. wss://xyz.trycloudflare.com or ws://192.168.1.x:28283">
         </div>
 
+        <div class="form-group">
+          <div class="setting-row">
+            <label for="zoomSlider">Screen Size: <strong id="modalZoomLabel">100%</strong></label>
+            <div class="zoom-presets">
+              <button type="button" class="preset-btn" data-zoom="0.5">50%</button>
+              <button type="button" class="preset-btn" data-zoom="0.75">75%</button>
+              <button type="button" class="preset-btn" data-zoom="0.9">90%</button>
+              <button type="button" class="preset-btn" data-zoom="1.0">Fit</button>
+            </div>
+          </div>
+          <input type="range" id="zoomSlider" min="30" max="150" step="5" value="100" class="zoom-slider">
+        </div>
+
         <div class="modal-actions">
           <button id="connectBtn" class="btn-primary full-width">Connect to Mac</button>
         </div>
@@ -122,6 +146,6 @@
     </div>
   </div>
 
-  <script src="app.js?v=3"></script>
+  <script src="app.js?v=4"></script>
 </body>
 </html>

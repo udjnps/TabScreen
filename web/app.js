@@ -25,6 +25,13 @@
   const sendTextBtn = document.getElementById('sendTextBtn');
   const closeKeyboardBtn = document.getElementById('closeKeyboardBtn');
 
+  // Zoom Elements
+  const zoomInBtn = document.getElementById('zoomInBtn');
+  const zoomOutBtn = document.getElementById('zoomOutBtn');
+  const zoomResetBtn = document.getElementById('zoomResetBtn');
+  const zoomSlider = document.getElementById('zoomSlider');
+  const modalZoomLabel = document.getElementById('modalZoomLabel');
+
   // State
   let ws = null;
   let decoder = null;
@@ -36,6 +43,7 @@
   let lastPingTime = 0;
   let latency = 0;
   let pingInterval = null;
+  let currentZoom = parseFloat(localStorage.getItem('tabscreen_zoom_level')) || 1.0;
 
   // Touch tracking
   let activeTouches = new Map();
@@ -46,9 +54,42 @@
 
   // Initialize
   function init() {
+    setZoom(currentZoom, false);
     setupEventListeners();
     checkUrlParamsAndConnect();
     startStatsLoop();
+  }
+
+  // Zoom Control (30% to 150%)
+  function setZoom(scale, save = true) {
+    scale = Math.max(0.3, Math.min(1.5, Math.round(scale * 100) / 100));
+    currentZoom = scale;
+
+    const percent = Math.round(scale * 100);
+    canvas.style.transform = `scale(${scale})`;
+
+    if (zoomResetBtn) {
+      zoomResetBtn.textContent = `${percent}%`;
+      zoomResetBtn.title = (scale === 1.0) ? 'Zoom: 100% (Fit Screen)' : 'Click to reset to 100%';
+    }
+    if (modalZoomLabel) modalZoomLabel.textContent = `${percent}%`;
+    if (zoomSlider) zoomSlider.value = percent;
+
+    if (save) {
+      localStorage.setItem('tabscreen_zoom_level', scale.toString());
+    }
+  }
+
+  function zoomIn() {
+    setZoom(currentZoom + 0.1);
+  }
+
+  function zoomOut() {
+    setZoom(currentZoom - 0.1);
+  }
+
+  function resetZoom() {
+    setZoom(1.0);
   }
 
   async function checkUrlParamsAndConnect() {
@@ -458,6 +499,24 @@
     fullscreenBtn.addEventListener('click', toggleFullscreen);
     settingsBtn.addEventListener('click', showModal);
 
+    // Zoom Controls
+    if (zoomInBtn) zoomInBtn.addEventListener('click', zoomIn);
+    if (zoomOutBtn) zoomOutBtn.addEventListener('click', zoomOut);
+    if (zoomResetBtn) zoomResetBtn.addEventListener('click', resetZoom);
+
+    if (zoomSlider) {
+      zoomSlider.addEventListener('input', (e) => {
+        setZoom(parseInt(e.target.value, 10) / 100);
+      });
+    }
+
+    document.querySelectorAll('.preset-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const val = parseFloat(btn.dataset.zoom);
+        if (!isNaN(val)) setZoom(val);
+      });
+    });
+
     connectBtn.addEventListener('click', () => {
       const url = streamUrlInput.value.trim();
       if (url) connect(url);
@@ -545,6 +604,9 @@
       if (longPressTimer) clearTimeout(longPressTimer);
       isTwoFingerScroll = true;
       lastScrollY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+      const dx = e.touches[0].clientX - e.touches[1].clientX;
+      const dy = e.touches[0].clientY - e.touches[1].clientY;
+      initialPinchDistance = Math.hypot(dx, dy);
     }
   }
 
@@ -558,12 +620,23 @@
       sendMousePacket(0, coords.x, coords.y); // Move/Drag
 
     } else if (e.touches.length === 2) {
-      const currentY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
-      const deltaY = (currentY - lastScrollY) * 2;
-      lastScrollY = currentY;
+      const dx = e.touches[0].clientX - e.touches[1].clientX;
+      const dy = e.touches[0].clientY - e.touches[1].clientY;
+      const currentDistance = Math.hypot(dx, dy);
 
-      const coords = getNormalizedCoordinates(e.touches[0].clientX, e.touches[0].clientY);
-      sendMousePacket(5, coords.x, coords.y, 0, deltaY); // Scroll
+      if (initialPinchDistance > 0 && Math.abs(currentDistance - initialPinchDistance) > 18) {
+        // Pinch-to-zoom
+        const zoomDelta = (currentDistance - initialPinchDistance) * 0.0015;
+        setZoom(currentZoom + zoomDelta);
+        initialPinchDistance = currentDistance;
+      } else {
+        const currentY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+        const deltaY = (currentY - lastScrollY) * 2;
+        lastScrollY = currentY;
+
+        const coords = getNormalizedCoordinates(e.touches[0].clientX, e.touches[0].clientY);
+        sendMousePacket(5, coords.x, coords.y, 0, deltaY); // Scroll
+      }
     }
   }
 
@@ -571,6 +644,10 @@
     e.preventDefault();
     if (longPressTimer) clearTimeout(longPressTimer);
     hideTouchFeedback();
+
+    if (e.touches.length < 2) {
+      initialPinchDistance = 0;
+    }
 
     if (e.touches.length === 0) {
       if (!isTwoFingerScroll) {
@@ -615,6 +692,12 @@
 
   function handleWheel(e) {
     e.preventDefault();
+    if (e.ctrlKey || e.metaKey) {
+      // Trackpad / mouse pinch-to-zoom
+      const delta = e.deltaY * -0.003;
+      setZoom(currentZoom + delta);
+      return;
+    }
     const coords = getNormalizedCoordinates(e.clientX, e.clientY);
     const deltaX = -e.deltaX;
     const deltaY = -e.deltaY;
