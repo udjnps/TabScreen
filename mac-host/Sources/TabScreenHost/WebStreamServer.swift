@@ -8,7 +8,7 @@ public class WebStreamServer {
     private var listener: NWListener?
     private var connections: [NWConnection] = []
     private let queue = DispatchQueue(label: "com.tabscreen.webStreamQueue", qos: .userInteractive)
-    private let port: NWEndpoint.Port = 28283
+    private let port: NWEndpoint.Port = 28285
 
     private var cloudflaredProcess: Process?
     public private(set) var publicTunnelURL: String?
@@ -42,6 +42,13 @@ public class WebStreamServer {
             self.isRunning = true
             print("[TabScreen Web] 🌐 Starting native WebSocket server on port \(self.port)...")
 
+            DispatchQueue.main.async {
+                self.onStateChanged?(true, nil)
+            }
+
+            // Immediately launch Cloudflare Tunnel in parallel
+            self.startCloudflaredTunnel()
+
             do {
                 let wsOptions = NWProtocolWebSocket.Options()
                 wsOptions.autoReplyPing = true
@@ -58,7 +65,6 @@ public class WebStreamServer {
                     switch state {
                     case .ready:
                         print("[TabScreen Web] ✅ WebSocket server ready on ws://127.0.0.1:\(self.port)")
-                        self.startCloudflaredTunnel()
                     case .failed(let error):
                         print("[TabScreen Web] ❌ Server failed with error: \(error)")
                         self.stop()
@@ -75,7 +81,7 @@ public class WebStreamServer {
                 self.onStreamStarted?()
             } catch {
                 print("[TabScreen Web] ❌ Failed to create NWListener: \(error)")
-                self.isRunning = false
+                self.stop()
             }
         }
     }
@@ -258,12 +264,16 @@ public class WebStreamServer {
         process.executableURL = URL(fileURLWithPath: cloudflaredPath)
         process.arguments = ["tunnel", "--url", "http://127.0.0.1:\(self.port)"]
 
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
+        var env = ProcessInfo.processInfo.environment
+        env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        process.environment = env
 
-        let outHandle = pipe.fileHandleForReading
-        outHandle.readabilityHandler = { [weak self] handle in
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        process.standardOutput = outPipe
+        process.standardError = errPipe
+
+        let lineHandler: (FileHandle) -> Void = { [weak self] handle in
             let data = handle.availableData
             guard !data.isEmpty, let output = String(data: data, encoding: .utf8) else { return }
 
@@ -273,6 +283,9 @@ public class WebStreamServer {
                 self?.handleTunnelURLDiscovered(url)
             }
         }
+
+        outPipe.fileHandleForReading.readabilityHandler = lineHandler
+        errPipe.fileHandleForReading.readabilityHandler = lineHandler
 
         do {
             try process.run()

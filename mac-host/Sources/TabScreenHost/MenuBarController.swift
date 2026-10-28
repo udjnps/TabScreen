@@ -114,6 +114,7 @@ public class MenuBarController: NSObject, NSMenuDelegate {
         let webToggle = NSMenuItem(title: "🌐 Start Web Screen Stream", action: #selector(toggleWebStreamClicked), keyEquivalent: "w")
         webToggle.keyEquivalentModifierMask = [.option]
         webToggle.target = self
+        webToggle.isEnabled = true
         menu.addItem(webToggle)
         self.webToggleMenuItem = webToggle
 
@@ -346,14 +347,16 @@ public class MenuBarController: NSObject, NSMenuDelegate {
                 let statusText = (tunnelURL != nil) ? "🟢 Web Stream: LIVE (\(clientsCount) client\(clientsCount == 1 ? "" : "s"))" : "🟡 Web Stream: Starting Tunnel..."
                 self.webStatusMenuItem?.title = statusText
                 self.webToggleMenuItem?.title = "🛑 Stop Web Screen Stream"
+                self.webToggleMenuItem?.isEnabled = true
                 self.copyWebLinkMenuItem?.isEnabled = (tunnelURL != nil)
                 self.openWebLinkMenuItem?.isEnabled = (tunnelURL != nil)
                 if let button = self.statusItem?.button {
-                    button.title = "🟢 TabScreen Web"
+                    button.title = (tunnelURL != nil) ? "🟢 TabScreen Web" : "🟡 TabScreen Web"
                 }
             } else {
                 self.webStatusMenuItem?.title = "🌐 Web Stream: OFF"
                 self.webToggleMenuItem?.title = "🌐 Start Web Screen Stream"
+                self.webToggleMenuItem?.isEnabled = true
                 self.copyWebLinkMenuItem?.isEnabled = false
                 self.openWebLinkMenuItem?.isEnabled = false
                 if let button = self.statusItem?.button {
