@@ -23,7 +23,7 @@ public class WebStreamServer {
     private var cloudflaredProcess: Process?
     public private(set) var publicTunnelURL: String?
     public private(set) var isRunning: Bool = false
-    public var vercelAppURL: String = "https://tabscreen-live.vercel.app"
+    public var vercelAppURL: String = "https://tabscreen-live.udjnps.workers.dev"
 
     public var onStateChanged: ((Bool, String?) -> Void)?
     public var onClientsChanged: ((Int) -> Void)?

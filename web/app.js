@@ -62,12 +62,30 @@
         if (resp.ok) {
           const data = await resp.json();
           if (data && data.url) {
-            console.log('Auto-discovered active stream from Vercel:', data.url);
+            console.log('Auto-discovered active stream:', data.url);
             streamParam = data.url;
           }
         }
-      } catch (err) {
-        console.warn('Auto-discovery lookup error:', err);
+      } catch (err) {}
+
+      // Instant global edge fallback (0ms cold start for Cloudflare & GitHub Pages)
+      if (!streamParam) {
+        try {
+          const ntfyResp = await fetch('https://ntfy.sh/tabscreen_udjnps_active_stream_v1/raw?poll=1', { cache: 'no-store' });
+          if (ntfyResp.ok) {
+            const rawText = (await ntfyResp.text()).trim();
+            const lines = rawText.split('\n').filter(Boolean);
+            if (lines.length > 0) {
+              const latestUrl = lines[lines.length - 1].trim();
+              if (latestUrl.startsWith('http://') || latestUrl.startsWith('https://')) {
+                console.log('Auto-discovered active stream from global edge cache:', latestUrl);
+                streamParam = latestUrl;
+              }
+            }
+          }
+        } catch (err) {
+          console.warn('Edge lookup error:', err);
+        }
       }
     }
 
