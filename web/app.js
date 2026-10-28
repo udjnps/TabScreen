@@ -129,28 +129,42 @@
   }
 
   // WebCodecs H.264 Video Decoder
-  function initVideoDecoder() {
+  let currentCodec = 'avc1.420020'; // H.264 Baseline Level 3.2 (macOS standard)
+  let hasReceivedKeyframe = false;
+  let lastChunkTimestamp = 0;
+
+  function initVideoDecoder(preferredCodec = currentCodec) {
     if (!('VideoDecoder' in window)) {
       alert('Your browser does not support hardware WebCodecs API. Please use modern Chrome, Safari, or Edge.');
       return;
     }
 
     try {
+      if (decoder && decoder.state !== 'closed') {
+        try { decoder.close(); } catch (_) {}
+      }
+
+      currentCodec = preferredCodec;
       decoderConfigured = false;
+      hasReceivedKeyframe = false;
+
       decoder = new VideoDecoder({
         output: handleDecodedFrame,
         error: (e) => {
-          console.warn('VideoDecoder reset required:', e);
-          decoderConfigured = false;
+          console.warn('VideoDecoder error, will auto-reconfigure on next keyframe:', e);
+          hasReceivedKeyframe = false;
+          try { decoder.close(); } catch (_) {}
+          decoder = null;
+          requestKeyframeFromHost();
         }
       });
 
-      // Configure for H.264 Baseline Auto-Level with low latency optimization
       decoder.configure({
-        codec: 'avc1.42E01F', // H.264 Baseline
+        codec: currentCodec,
         optimizeForLatency: true
       });
       decoderConfigured = true;
+      console.log('VideoDecoder configured with codec:', currentCodec);
     } catch (e) {
       console.error('Error configuring VideoDecoder:', e);
     }
@@ -165,6 +179,30 @@
     ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
     frame.close();
     frameCount++;
+  }
+
+  function requestKeyframeFromHost() {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(new Uint8Array([0xFE])); // 0xFE = Request Keyframe
+    }
+  }
+
+  function parseSpsCodec(bytes) {
+    const len = bytes.length;
+    for (let i = 0; i < len - 4; i++) {
+      if (bytes[i] === 0 && bytes[i+1] === 0 && (bytes[i+2] === 1 || (bytes[i+2] === 0 && bytes[i+3] === 1))) {
+        const offset = (bytes[i+2] === 1) ? (i + 3) : (i + 4);
+        if (offset < len && (bytes[offset] & 0x1F) === 7) {
+          if (offset + 3 < len) {
+            const profile = bytes[offset + 1].toString(16).padStart(2, '0');
+            const compat = bytes[offset + 2].toString(16).padStart(2, '0');
+            const level = bytes[offset + 3].toString(16).padStart(2, '0');
+            return `avc1.${profile}${compat}${level}`;
+          }
+        }
+      }
+    }
+    return null;
   }
 
   function handleIncomingMessage(data) {
@@ -187,19 +225,59 @@
   }
 
   function feedH264Chunk(h264Bytes) {
-    if (!decoder || decoder.state !== 'configured') return;
-
     const isKey = checkIsKeyframe(h264Bytes);
-    const chunk = new EncodedVideoChunk({
-      type: isKey ? 'key' : 'delta',
-      timestamp: performance.now() * 1000,
-      data: h264Bytes
-    });
+
+    // If keyframe contains SPS, verify codec match
+    if (isKey) {
+      const detectedCodec = parseSpsCodec(h264Bytes);
+      if (detectedCodec && detectedCodec !== currentCodec) {
+        console.log(`Detected new codec in SPS: ${detectedCodec} (was ${currentCodec}), reconfiguring...`);
+        initVideoDecoder(detectedCodec);
+      }
+    }
+
+    if (!decoder || decoder.state !== 'configured') {
+      if (isKey) {
+        initVideoDecoder(currentCodec);
+      } else {
+        requestKeyframeFromHost();
+        return;
+      }
+    }
+
+    // Must start decoding with a keyframe
+    if (!hasReceivedKeyframe) {
+      if (!isKey) {
+        requestKeyframeFromHost();
+        return;
+      }
+      hasReceivedKeyframe = true;
+    }
+
+    // Ensure timestamp is an integer (in microseconds) and strictly monotonic
+    let ts = Math.round(performance.now() * 1000);
+    if (ts <= lastChunkTimestamp) {
+      ts = lastChunkTimestamp + 1000;
+    }
+    lastChunkTimestamp = ts;
 
     try {
+      const chunk = new EncodedVideoChunk({
+        type: isKey ? 'key' : 'delta',
+        timestamp: ts,
+        data: h264Bytes
+      });
+
+      // Avoid queue bloat: drop non-keyframe if decoder queue is backed up
+      if (decoder.decodeQueueSize > 2 && !isKey) {
+        return;
+      }
+
       decoder.decode(chunk);
     } catch (e) {
-      console.warn('Decode error, waiting for next keyframe:', e);
+      console.warn('Decode chunk failed:', e);
+      hasReceivedKeyframe = false;
+      requestKeyframeFromHost();
     }
   }
 

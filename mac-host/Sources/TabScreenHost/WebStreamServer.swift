@@ -179,8 +179,17 @@ public class WebStreamServer {
             guard let self = self, let conn = connection else { return }
 
             if let data = content, !data.isEmpty {
-                // Forward input data directly to InputInjector
-                self.onInputDataReceived?(data)
+                let firstByte = data[0]
+                if firstByte == 0xFF {
+                    // Ping packet: echo back pong immediately
+                    self.sendPacket(data, to: conn)
+                } else if firstByte == 0xFE {
+                    // Keyframe request packet
+                    self.onRequestKeyframe?()
+                } else {
+                    // Forward input data directly to InputInjector
+                    self.onInputDataReceived?(data)
+                }
             }
 
             if isComplete || error != nil {
@@ -214,7 +223,9 @@ public class WebStreamServer {
             wsPacket.append(annexBData)
 
             for conn in self.connections {
-                self.sendPacket(wsPacket, to: conn)
+                if conn.state == .ready {
+                    self.sendPacket(wsPacket, to: conn)
+                }
             }
         }
     }

@@ -159,9 +159,9 @@ public class ScreenStreamer: NSObject, SCStreamOutput, SCStreamDelegate {
 
         let now = CACurrentMediaTime()
         if isIdle {
-            // Heartbeat: allow at most 1 frame per second when the screen is static
-            // Saves significant Mac CPU/GPU encoding power, Wi-Fi radio power, and tablet decoding battery
-            if now - lastFrameTime < 1.0 {
+            // Heartbeat: allow at most 10 frames per second when the screen is static (every 100ms)
+            // Ensures clock, cursor, and web viewer remain responsive with virtually zero CPU overhead
+            if now - lastFrameTime < 0.1 {
                 return
             }
         }
