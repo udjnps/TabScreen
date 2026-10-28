@@ -29,8 +29,7 @@ public class WebStreamServer {
     }
 
     public var fullViewerURL: String? {
-        guard let tunnel = publicTunnelURL else { return nil }
-        return "\(vercelAppURL)/?stream=\(tunnel)"
+        return vercelAppURL
     }
 
     private init() {}
@@ -311,13 +310,35 @@ public class WebStreamServer {
         self.publicTunnelURL = tunnelURL
         print("[TabScreen Web] 🎉 Cloudflare Tunnel online: \(tunnelURL)")
 
-        let fullURL = "\(vercelAppURL)/?stream=\(tunnelURL)"
-        print("[TabScreen Web] 📋 Web Viewer URL: \(fullURL)")
+        // Register active tunnel URL with Vercel Discovery API & Backup
+        registerActiveStream(tunnelURL: tunnelURL)
+
+        print("[TabScreen Web] 📋 Permanent Viewer URL: \(vercelAppURL)")
 
         DispatchQueue.main.async {
             self.copyViewerLinkToClipboard()
-            self.showNotification(title: "🌐 TabScreen Web Live", subtitle: "Public link copied to clipboard!", url: fullURL)
+            self.showNotification(title: "🌐 TabScreen Web Live", subtitle: "Permanent link copied to clipboard!", url: self.vercelAppURL)
             self.onStateChanged?(true, tunnelURL)
+        }
+    }
+
+    private func registerActiveStream(tunnelURL: String) {
+        // 1. Post to Vercel discovery endpoint
+        if let vercelEndpoint = URL(string: "\(vercelAppURL)/api/stream") {
+            var req = URLRequest(url: vercelEndpoint)
+            req.httpMethod = "POST"
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            let payload = ["url": tunnelURL]
+            req.httpBody = try? JSONSerialization.data(withJSONObject: payload)
+            URLSession.shared.dataTask(with: req) { _, _, _ in }.resume()
+        }
+
+        // 2. Direct backup registration with discovery topic
+        if let ntfyEndpoint = URL(string: "https://ntfy.sh/tabscreen_udjnps_active_stream_v1") {
+            var req = URLRequest(url: ntfyEndpoint)
+            req.httpMethod = "POST"
+            req.httpBody = tunnelURL.data(using: .utf8)
+            URLSession.shared.dataTask(with: req) { _, _, _ in }.resume()
         }
     }
 

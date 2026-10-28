@@ -51,9 +51,29 @@
     startStatsLoop();
   }
 
-  function checkUrlParamsAndConnect() {
+  async function checkUrlParamsAndConnect() {
     const params = new URLSearchParams(window.location.search);
-    const streamParam = params.get('stream') || localStorage.getItem('tabscreen_stream_url');
+    let streamParam = params.get('stream');
+
+    if (!streamParam) {
+      updateStatus('connecting', 'Locating Mac stream...');
+      try {
+        const resp = await fetch('/api/stream', { cache: 'no-store' });
+        if (resp.ok) {
+          const data = await resp.json();
+          if (data && data.url) {
+            console.log('Auto-discovered active stream from Vercel:', data.url);
+            streamParam = data.url;
+          }
+        }
+      } catch (err) {
+        console.warn('Auto-discovery lookup error:', err);
+      }
+    }
+
+    if (!streamParam) {
+      streamParam = localStorage.getItem('tabscreen_stream_url');
+    }
 
     if (streamParam) {
       streamUrlInput.value = streamParam;
@@ -103,9 +123,11 @@
       };
 
       ws.onclose = () => {
-        updateStatus('disconnected', 'Disconnected');
+        updateStatus('disconnected', 'Disconnected - Auto reconnecting...');
         stopPing();
-        showModal();
+        setTimeout(() => {
+          checkUrlParamsAndConnect();
+        }, 4000);
       };
 
       ws.onerror = (err) => {
