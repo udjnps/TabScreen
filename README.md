@@ -15,6 +15,22 @@
 
 ---
 
+## 🌐 TabScreen Web: Stream & Control your Mac from Any Browser
+
+TabScreen now includes **TabScreen Web**—stream your Mac screen directly to any browser or phone/tablet anywhere in the world with **ultra-low latency hardware H.264 decoding** and **full bidirectional touch & mouse remote control**.
+
+### Live Web Viewer
+🔗 **[https://tabscreen-live.vercel.app](https://tabscreen-live.vercel.app)**
+
+### How to Use 1-Click Menu Bar Toggle:
+1. In your top macOS Menu Bar, click **📱 TabScreen** (or press `⌥W`).
+2. Click **🌐 Start Web Screen Stream**.
+3. TabScreen automatically launches an encrypted tunnel, generates your link, and **copies it to your clipboard**.
+4. Open the link on any device (iPhone, iPad, Android, Windows, Mac) to view and control your Mac screen with clicks, drags, and typing!
+5. To stop streaming, click **📱 TabScreen** → **🛑 Stop Web Screen Stream**.
+
+---
+
 ## 🚀 Usage
 
 ### Run Manually
