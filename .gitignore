@@ -1,0 +1,27 @@
+# macOS
+.DS_Store
+*.swp
+*.lock
+
+# Swift / Xcode
+.build/
+Packages/
+*.xcodeproj/
+*.xcworkspace/
+DerivedData/
+
+# Node / Vercel
+node_modules/
+.vercel/
+npm-debug.log*
+
+# Android / Gradle
+android-app/.gradle/
+android-app/build/
+android-app/app/build/
+local.properties
+*.iml
+.idea/
+
+# Binaries / Logs
+*.log

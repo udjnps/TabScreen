@@ -1,0 +1,6 @@
+{
+  "name": "tabscreen-web",
+  "version": "1.0.0",
+  "description": "Ultra low latency live screen streaming & touch control for macOS",
+  "private": true
+}

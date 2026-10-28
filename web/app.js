@@ -1,0 +1,543 @@
+// TabScreen Web - Ultra Low Latency Client for macOS Screen Streaming
+(function() {
+  'use strict';
+
+  // Elements
+  const container = document.getElementById('appContainer');
+  const canvas = document.getElementById('displayCanvas');
+  const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
+  const toolbar = document.getElementById('toolbar');
+  const statusBadge = document.getElementById('statusBadge');
+  const statusText = document.getElementById('statusText');
+  const fpsStat = document.getElementById('fpsStat');
+  const latencyStat = document.getElementById('latencyStat');
+  const touchFeedback = document.getElementById('touchFeedback');
+  const systemActionsBtn = document.getElementById('systemActionsBtn');
+  const systemActionsMenu = document.getElementById('systemActionsMenu');
+  const keyboardToggleBtn = document.getElementById('keyboardToggleBtn');
+  const keyboardDrawer = document.getElementById('virtualKeyboardDrawer');
+  const fullscreenBtn = document.getElementById('fullscreenBtn');
+  const settingsBtn = document.getElementById('settingsBtn');
+  const connectModal = document.getElementById('connectModal');
+  const streamUrlInput = document.getElementById('streamUrlInput');
+  const connectBtn = document.getElementById('connectBtn');
+  const directTextInput = document.getElementById('directTextInput');
+  const sendTextBtn = document.getElementById('sendTextBtn');
+  const closeKeyboardBtn = document.getElementById('closeKeyboardBtn');
+
+  // State
+  let ws = null;
+  let decoder = null;
+  let decoderConfigured = false;
+  let frameCount = 0;
+  let fps = 0;
+  let lastFpsTime = performance.now();
+  let toolbarTimeout = null;
+  let lastPingTime = 0;
+  let latency = 0;
+  let pingInterval = null;
+
+  // Touch tracking
+  let activeTouches = new Map();
+  let initialPinchDistance = 0;
+  let isTwoFingerScroll = false;
+  let lastScrollY = 0;
+  let longPressTimer = null;
+
+  // Initialize
+  function init() {
+    setupEventListeners();
+    checkUrlParamsAndConnect();
+    startStatsLoop();
+  }
+
+  function checkUrlParamsAndConnect() {
+    const params = new URLSearchParams(window.location.search);
+    const streamParam = params.get('stream') || localStorage.getItem('tabscreen_stream_url');
+
+    if (streamParam) {
+      streamUrlInput.value = streamParam;
+      connect(streamParam);
+    } else {
+      showModal();
+    }
+  }
+
+  function formatWsUrl(url) {
+    let clean = url.trim();
+    if (!clean.startsWith('ws://') && !clean.startsWith('wss://')) {
+      if (clean.startsWith('https://')) {
+        clean = 'wss://' + clean.slice(8);
+      } else if (clean.startsWith('http://')) {
+        clean = 'ws://' + clean.slice(7);
+      } else {
+        clean = 'wss://' + clean;
+      }
+    }
+    // Remove trailing slashes
+    clean = clean.replace(/\/+$/, '');
+    return clean;
+  }
+
+  // WebSocket Connection
+  function connect(targetUrl) {
+    if (ws) {
+      try { ws.close(); } catch (e) {}
+    }
+
+    const wsUrl = formatWsUrl(targetUrl);
+    localStorage.setItem('tabscreen_stream_url', targetUrl);
+    hideModal();
+
+    updateStatus('connecting', 'Connecting...');
+
+    try {
+      ws = new WebSocket(wsUrl);
+      ws.binaryType = 'arraybuffer';
+
+      ws.onopen = () => {
+        updateStatus('connected', 'Live (60 FPS)');
+        initVideoDecoder();
+        showToolbarTemporarily();
+        startPing();
+      };
+
+      ws.onclose = () => {
+        updateStatus('disconnected', 'Disconnected');
+        stopPing();
+        showModal();
+      };
+
+      ws.onerror = (err) => {
+        console.error('WebSocket Error:', err);
+        updateStatus('disconnected', 'Connection Error');
+      };
+
+      ws.onmessage = (event) => {
+        handleIncomingMessage(event.data);
+      };
+    } catch (err) {
+      console.error('Failed to open WebSocket:', err);
+      updateStatus('disconnected', 'Failed to connect');
+      showModal();
+    }
+  }
+
+  function updateStatus(state, text) {
+    statusBadge.className = 'status-badge ' + state;
+    statusText.textContent = text;
+  }
+
+  // WebCodecs H.264 Video Decoder
+  function initVideoDecoder() {
+    if (!('VideoDecoder' in window)) {
+      alert('Your browser does not support hardware WebCodecs API. Please use modern Chrome, Safari, or Edge.');
+      return;
+    }
+
+    try {
+      decoderConfigured = false;
+      decoder = new VideoDecoder({
+        output: handleDecodedFrame,
+        error: (e) => {
+          console.warn('VideoDecoder reset required:', e);
+          decoderConfigured = false;
+        }
+      });
+
+      // Configure for H.264 Baseline Auto-Level with low latency optimization
+      decoder.configure({
+        codec: 'avc1.42E01F', // H.264 Baseline
+        optimizeForLatency: true
+      });
+      decoderConfigured = true;
+    } catch (e) {
+      console.error('Error configuring VideoDecoder:', e);
+    }
+  }
+
+  function handleDecodedFrame(frame) {
+    if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight) {
+      canvas.width = frame.displayWidth;
+      canvas.height = frame.displayHeight;
+    }
+
+    ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
+    frame.close();
+    frameCount++;
+  }
+
+  function handleIncomingMessage(data) {
+    if (!(data instanceof ArrayBuffer)) return;
+    const bytes = new Uint8Array(data);
+    if (bytes.length === 0) return;
+
+    const packetType = bytes[0];
+
+    // Packet type 0x01 = Video frame (H.264 Annex-B)
+    if (packetType === 0x01) {
+      const h264Data = bytes.subarray(1);
+      feedH264Chunk(h264Data);
+    } else if (packetType === 0xFF) {
+      // Ping response
+      const now = performance.now();
+      latency = Math.round(now - lastPingTime);
+      latencyStat.textContent = `${latency} ms`;
+    }
+  }
+
+  function feedH264Chunk(h264Bytes) {
+    if (!decoder || decoder.state !== 'configured') return;
+
+    const isKey = checkIsKeyframe(h264Bytes);
+    const chunk = new EncodedVideoChunk({
+      type: isKey ? 'key' : 'delta',
+      timestamp: performance.now() * 1000,
+      data: h264Bytes
+    });
+
+    try {
+      decoder.decode(chunk);
+    } catch (e) {
+      console.warn('Decode error, waiting for next keyframe:', e);
+    }
+  }
+
+  function checkIsKeyframe(bytes) {
+    const len = bytes.length;
+    for (let i = 0; i < len - 4; i++) {
+      if (bytes[i] === 0 && bytes[i+1] === 0 && (bytes[i+2] === 1 || (bytes[i+2] === 0 && bytes[i+3] === 1))) {
+        const offset = (bytes[i+2] === 1) ? (i + 3) : (i + 4);
+        if (offset < len) {
+          const nalType = bytes[offset] & 0x1F;
+          if (nalType === 5 || nalType === 7) {
+            return true;
+          }
+        }
+      }
+    }
+    return false;
+  }
+
+  // Ping Loop
+  function startPing() {
+    stopPing();
+    pingInterval = setInterval(() => {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        lastPingTime = performance.now();
+        ws.send(new Uint8Array([0xFF]));
+      }
+    }, 2000);
+  }
+
+  function stopPing() {
+    if (pingInterval) clearInterval(pingInterval);
+  }
+
+  // Stats loop (FPS)
+  function startStatsLoop() {
+    setInterval(() => {
+      const now = performance.now();
+      const elapsed = (now - lastFpsTime) / 1000;
+      fps = Math.round(frameCount / elapsed);
+      fpsStat.textContent = `${fps} FPS`;
+      frameCount = 0;
+      lastFpsTime = now;
+    }, 1000);
+  }
+
+  // Input Mapping (macOS 18-byte Packet Protocol)
+  function getNormalizedCoordinates(clientX, clientY) {
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return { x: 0, y: 0 };
+
+    const normX = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    const normY = Math.max(0, Math.min(1, (clientY - rect.top) / rect.height));
+    return { x: normX, y: normY };
+  }
+
+  function sendMousePacket(type, normX, normY, deltaX = 0, deltaY = 0, toolType = 0) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+    const buffer = new ArrayBuffer(18);
+    const view = new DataView(buffer);
+
+    view.setUint8(0, type);
+    view.setUint8(1, toolType); // 0 = Natural Touch, 1 = Trackpad
+    view.setFloat32(2, normX, false); // Big Endian
+    view.setFloat32(6, normY, false);
+    view.setFloat32(10, deltaX, false);
+    view.setFloat32(14, deltaY, false);
+
+    ws.send(buffer);
+  }
+
+  function sendKeyPacket(keyCode, isDown) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const packet = new Uint8Array([6, keyCode, isDown ? 1 : 0]);
+    ws.send(packet);
+  }
+
+  function sendUnicodePacket(charCode) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const high = (charCode >> 8) & 0xFF;
+    const low = charCode & 0xFF;
+    const packet = new Uint8Array([7, high, low]);
+    ws.send(packet);
+  }
+
+  function sendSystemAction(actionId) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const packet = new Uint8Array([12, actionId, 0]);
+    ws.send(packet);
+  }
+
+  // Event Listeners
+  function setupEventListeners() {
+    // Toolbar auto-hide on inactivity
+    window.addEventListener('mousemove', (e) => {
+      if (e.clientY < 70) {
+        showToolbarTemporarily();
+      }
+    });
+
+    window.addEventListener('click', (e) => {
+      if (!systemActionsMenu.contains(e.target) && e.target !== systemActionsBtn) {
+        systemActionsMenu.classList.add('hidden');
+      }
+    });
+
+    // Touch events on canvas
+    canvas.addEventListener('touchstart', handleTouchStart, { passive: false });
+    canvas.addEventListener('touchmove', handleTouchMove, { passive: false });
+    canvas.addEventListener('touchend', handleTouchEnd, { passive: false });
+    canvas.addEventListener('touchcancel', handleTouchEnd, { passive: false });
+
+    // Mouse events on canvas (desktop)
+    canvas.addEventListener('mousedown', handleMouseDown);
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+    canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+    canvas.addEventListener('wheel', handleWheel, { passive: false });
+
+    // Toolbar buttons
+    systemActionsBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      systemActionsMenu.classList.toggle('hidden');
+    });
+
+    keyboardToggleBtn.addEventListener('click', () => {
+      keyboardDrawer.classList.toggle('hidden');
+      if (!keyboardDrawer.classList.contains('hidden')) {
+        directTextInput.focus();
+      }
+    });
+
+    closeKeyboardBtn.addEventListener('click', () => {
+      keyboardDrawer.classList.add('hidden');
+    });
+
+    fullscreenBtn.addEventListener('click', toggleFullscreen);
+    settingsBtn.addEventListener('click', showModal);
+
+    connectBtn.addEventListener('click', () => {
+      const url = streamUrlInput.value.trim();
+      if (url) connect(url);
+    });
+
+    // System Action Buttons
+    document.querySelectorAll('.action-item').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const action = btn.dataset.action;
+        const shortcut = btn.dataset.shortcut;
+        if (action) {
+          sendSystemAction(parseInt(action, 10));
+        } else if (shortcut === 'spotlight') {
+          // Cmd + Space
+          sendKeyPacket(55, true);  // Cmd Down
+          sendKeyPacket(49, true);  // Space Down
+          sendKeyPacket(49, false); // Space Up
+          sendKeyPacket(55, false); // Cmd Up
+        } else if (shortcut === 'appswitch') {
+          // Cmd + Tab
+          sendKeyPacket(55, true);
+          sendKeyPacket(48, true);
+          sendKeyPacket(48, false);
+          sendKeyPacket(55, false);
+        }
+        systemActionsMenu.classList.add('hidden');
+      });
+    });
+
+    // Special Keyboard Keys
+    document.querySelectorAll('.key-btn').forEach(btn => {
+      const keyCode = parseInt(btn.dataset.key, 10);
+      const isModifier = btn.classList.contains('modifier');
+
+      btn.addEventListener('click', () => {
+        if (isModifier) {
+          const isActive = btn.classList.toggle('active');
+          sendKeyPacket(keyCode, isActive);
+        } else {
+          sendKeyPacket(keyCode, true);
+          setTimeout(() => sendKeyPacket(keyCode, false), 50);
+        }
+      });
+    });
+
+    // Direct text sender
+    sendTextBtn.addEventListener('click', sendDirectText);
+    directTextInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        sendDirectText();
+      }
+    });
+  }
+
+  function sendDirectText() {
+    const text = directTextInput.value;
+    if (!text) return;
+    for (let i = 0; i < text.length; i++) {
+      sendUnicodePacket(text.charCodeAt(i));
+    }
+    directTextInput.value = '';
+  }
+
+  // Touch Handlers
+  function handleTouchStart(e) {
+    e.preventDefault();
+    showToolbarTemporarily();
+
+    if (e.touches.length === 1) {
+      isTwoFingerScroll = false;
+      const touch = e.touches[0];
+      const coords = getNormalizedCoordinates(touch.clientX, touch.clientY);
+
+      showTouchFeedback(touch.clientX, touch.clientY);
+      sendMousePacket(1, coords.x, coords.y); // Down
+
+      // Long press for Right Click
+      if (longPressTimer) clearTimeout(longPressTimer);
+      longPressTimer = setTimeout(() => {
+        sendMousePacket(3, coords.x, coords.y); // Right Down
+        setTimeout(() => sendMousePacket(4, coords.x, coords.y), 40); // Right Up
+      }, 500);
+
+    } else if (e.touches.length === 2) {
+      if (longPressTimer) clearTimeout(longPressTimer);
+      isTwoFingerScroll = true;
+      lastScrollY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+    }
+  }
+
+  function handleTouchMove(e) {
+    e.preventDefault();
+
+    if (e.touches.length === 1 && !isTwoFingerScroll) {
+      if (longPressTimer) clearTimeout(longPressTimer);
+      const touch = e.touches[0];
+      const coords = getNormalizedCoordinates(touch.clientX, touch.clientY);
+      sendMousePacket(0, coords.x, coords.y); // Move/Drag
+
+    } else if (e.touches.length === 2) {
+      const currentY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+      const deltaY = (currentY - lastScrollY) * 2;
+      lastScrollY = currentY;
+
+      const coords = getNormalizedCoordinates(e.touches[0].clientX, e.touches[0].clientY);
+      sendMousePacket(5, coords.x, coords.y, 0, deltaY); // Scroll
+    }
+  }
+
+  function handleTouchEnd(e) {
+    e.preventDefault();
+    if (longPressTimer) clearTimeout(longPressTimer);
+    hideTouchFeedback();
+
+    if (e.touches.length === 0) {
+      if (!isTwoFingerScroll) {
+        if (e.changedTouches.length > 0) {
+          const touch = e.changedTouches[0];
+          const coords = getNormalizedCoordinates(touch.clientX, touch.clientY);
+          sendMousePacket(2, coords.x, coords.y); // Up
+        }
+      }
+      isTwoFingerScroll = false;
+    }
+  }
+
+  // Mouse Handlers
+  let isMouseDown = false;
+  function handleMouseDown(e) {
+    isMouseDown = true;
+    const coords = getNormalizedCoordinates(e.clientX, e.clientY);
+    if (e.button === 0) {
+      sendMousePacket(1, coords.x, coords.y); // Left Down
+    } else if (e.button === 2) {
+      sendMousePacket(3, coords.x, coords.y); // Right Down
+    }
+  }
+
+  function handleMouseMove(e) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const coords = getNormalizedCoordinates(e.clientX, e.clientY);
+    sendMousePacket(0, coords.x, coords.y); // Move
+  }
+
+  function handleMouseUp(e) {
+    if (!isMouseDown) return;
+    isMouseDown = false;
+    const coords = getNormalizedCoordinates(e.clientX, e.clientY);
+    if (e.button === 0) {
+      sendMousePacket(2, coords.x, coords.y); // Left Up
+    } else if (e.button === 2) {
+      sendMousePacket(4, coords.x, coords.y); // Right Up
+    }
+  }
+
+  function handleWheel(e) {
+    e.preventDefault();
+    const coords = getNormalizedCoordinates(e.clientX, e.clientY);
+    const deltaX = -e.deltaX;
+    const deltaY = -e.deltaY;
+    sendMousePacket(5, coords.x, coords.y, deltaX, deltaY);
+  }
+
+  // UI Helpers
+  function showToolbarTemporarily() {
+    toolbar.classList.remove('hidden');
+    if (toolbarTimeout) clearTimeout(toolbarTimeout);
+    toolbarTimeout = setTimeout(() => {
+      toolbar.classList.add('hidden');
+    }, 3500);
+  }
+
+  function showTouchFeedback(x, y) {
+    touchFeedback.style.left = `${x}px`;
+    touchFeedback.style.top = `${y}px`;
+    touchFeedback.classList.add('active');
+  }
+
+  function hideTouchFeedback() {
+    touchFeedback.classList.remove('active');
+  }
+
+  function toggleFullscreen() {
+    if (!document.fullscreenElement) {
+      document.documentElement.requestFullscreen().catch(() => {});
+    } else {
+      document.exitFullscreen().catch(() => {});
+    }
+  }
+
+  function showModal() {
+    connectModal.classList.remove('hidden');
+  }
+
+  function hideModal() {
+    connectModal.classList.add('hidden');
+  }
+
+  // Run on page load
+  window.addEventListener('DOMContentLoaded', init);
+})();
